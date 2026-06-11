@@ -56,6 +56,8 @@ uv run python crawl_baidu_graph_images.py --html /Users/wangzhihua1/code/baidu-c
 - `--scroll-pixels`：每次滚动像素数，默认 `2000`。
 - `--scroll-wait`：每次滚动后等待毫秒数，默认 `3000`。
 - `--no-progress`：关闭进度条，适合把输出重定向到日志文件时使用。
+- `--workers`：并发上传源图片的 Playwright worker 数，默认 `1`。
+- `--download-workers`：每张源图相似图片下载并发数，默认 `1`。
 
 先检查能提取到哪些图片 URL：
 
@@ -97,6 +99,21 @@ uv run python crawl_baidu_graph_images.py \
 
 上传目录时会显示两个进度条：外层是源图片处理进度，内层是当前源图片的相似图片下载进度。
 
+图片很多时可以开启并发。建议先从较小并发开始，避免百度页面风控或本机浏览器实例占用过高：
+
+```bash
+uv run python crawl_baidu_graph_images.py \
+  --upload-dir /Users/wangzhihua1/code/baidu-crawl/thumbnails_v2/FN \
+  --recursive \
+  --preserve-tree \
+  -o "images/thumbnails_v2/FN" \
+  --save-html-dir "html/thumbnails_v2/FN" \
+  --workers 2 \
+  --download-workers 4
+```
+
+`--workers` 会启动多个 Playwright browser worker 并发上传源图；`--download-workers` 只影响每张源图解析出的相似图片下载。
+
 ### 保留源目录树
 
 如果要保留 `/Users/wangzhihua1/code/baidu-crawl/thumbnails_v2/FN` 后面的目录树，使用 `--upload-dir` 指向这个根目录，并加上 `--recursive --preserve-tree`：
@@ -106,11 +123,14 @@ uv run python crawl_baidu_graph_images.py \
   --upload-dir /Users/wangzhihua1/code/baidu-crawl/thumbnails_v2/FN \
   --recursive \
   --preserve-tree \
-  -o "images/thumbnails_FN/" \
-  --save-html-dir "html/thumbnails_FN" \
+  -o "images/thumbnails_FN2/" \
+  --save-html-dir "html/thumbnails_FN2" \
   --scrolls 6 \
   --scroll-pixels 3000 \
-  --scroll-wait 5000
+  --scroll-wait 5000 \
+  --workers 2 \
+  --download-workers 4
+
 ```
 
 例如源图片：

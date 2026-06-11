@@ -8,6 +8,7 @@ import mimetypes
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -349,7 +350,8 @@ def crawl_urls(
         unit="张",
         leave=False,
     )
-    for offset, url in enumerate(progress):
+
+    def download_at(offset: int, url: str) -> tuple[int, str, Path | Exception]:
         index = args.start + offset
         try:
             path = download_one(
@@ -363,19 +365,101 @@ def crawl_urls(
                 force_suffix=force_suffix,
             )
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            tqdm.write(f"[失败] {index:0{args.digits}d} {url} -> {exc}", file=sys.stderr)
-            continue
+            return index, url, exc
+        return index, url, path
 
-        success += 1
-        if args.no_progress:
-            print(f"[保存] {path}")
-        else:
-            progress.set_postfix_str(f"成功 {success}/{len(urls)}")
-        if args.sleep > 0 and offset != len(urls) - 1:
-            time.sleep(args.sleep)
+    if args.download_workers <= 1:
+        for offset, url in enumerate(progress):
+            index, failed_url, result = download_at(offset, url)
+            if isinstance(result, Exception):
+                tqdm.write(
+                    f"[失败] {index:0{args.digits}d} {failed_url} -> {result}",
+                    file=sys.stderr,
+                )
+                continue
+
+            success += 1
+            if args.no_progress:
+                print(f"[保存] {result}")
+            else:
+                progress.set_postfix_str(f"成功 {success}/{len(urls)}")
+            if args.sleep > 0 and offset != len(urls) - 1:
+                time.sleep(args.sleep)
+    else:
+        progress.close()
+        with ThreadPoolExecutor(max_workers=args.download_workers) as executor:
+            futures = {
+                executor.submit(download_at, offset, url): (offset, url)
+                for offset, url in enumerate(urls)
+            }
+            with tqdm(
+                total=len(futures),
+                desc=f"下载 {name_prefix}",
+                disable=args.no_progress,
+                unit="张",
+                leave=False,
+            ) as download_progress:
+                for future in as_completed(futures):
+                    index, failed_url, result = future.result()
+                    if isinstance(result, Exception):
+                        tqdm.write(
+                            f"[失败] {index:0{args.digits}d} {failed_url} -> {result}",
+                            file=sys.stderr,
+                        )
+                    else:
+                        success += 1
+                        if args.no_progress:
+                            print(f"[保存] {result}")
+                        else:
+                            download_progress.set_postfix_str(f"成功 {success}/{len(urls)}")
+                    download_progress.update(1)
 
     print(f"完成：成功下载 {success}/{len(urls)} 张图片，目录：{output_dir.resolve()}")
     return 0 if success else 1
+
+
+def process_uploaded_page(
+    image_path: Path,
+    html: str,
+    base_url: str,
+    output_dir: Path,
+    save_html_dir: Path | None,
+    args: argparse.Namespace,
+) -> int:
+    save_uploaded_html(html, image_path, save_html_dir, args.encoding, args)
+    name_prefix = args.name or image_path.stem
+    current_output_dir = output_dir_for_image(output_dir, image_path, args)
+    urls = parse_image_urls(html, base_url)
+    return crawl_urls(urls, current_output_dir, name_prefix, args)
+
+
+def split_chunks(values: list[Path], chunk_count: int) -> list[list[Path]]:
+    chunks: list[list[Path]] = [[] for _ in range(chunk_count)]
+    for index, value in enumerate(values):
+        chunks[index % chunk_count].append(value)
+    return [chunk for chunk in chunks if chunk]
+
+
+def process_uploaded_chunk(
+    image_paths: list[Path],
+    output_dir: Path,
+    save_html_dir: Path | None,
+    args: argparse.Namespace,
+    source_progress: tqdm,
+) -> int:
+    exit_code = 0
+    for image_path, html, base_url in iter_uploaded_htmls(image_paths, args):
+        try:
+            if not args.no_progress:
+                source_progress.set_postfix_str(image_path.name[:40])
+            result = process_uploaded_page(
+                image_path, html, base_url, output_dir, save_html_dir, args
+            )
+            if result != 0:
+                exit_code = result
+        finally:
+            source_progress.update(1)
+    return exit_code
 
 
 def parse_args() -> argparse.Namespace:
@@ -392,7 +476,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start", type=int, default=0, help="起始编号，默认 0")
     parser.add_argument("--digits", type=int, default=6, help="编号位数，默认 6")
     parser.add_argument("--limit", type=int, default=0, help="最多下载多少张，0 表示不限")
-    parser.add_argument("--sleep", type=float, default=0.2, help="每张下载间隔秒数")
+    parser.add_argument("--sleep", type=float, default=0.1, help="每张下载间隔秒数")
     parser.add_argument("--timeout", type=float, default=20, help="请求超时时间秒数")
     parser.add_argument("--encoding", default="utf-8", help="HTML 默认编码")
     parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
@@ -428,6 +512,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scroll-pixels", type=int, default=2000, help="每次滚动像素数")
     parser.add_argument("--scroll-wait", type=int, default=3000, help="每次滚动后等待毫秒数")
     parser.add_argument("--no-progress", action="store_true", help="关闭 tqdm 进度条")
+    parser.add_argument("--workers", type=int, default=1, help="并发上传源图片的 Playwright worker 数，默认 1")
+    parser.add_argument("--download-workers", type=int, default=1, help="每张源图相似图片下载并发数，默认 1")
     return parser.parse_args()
 
 
@@ -466,19 +552,29 @@ def main() -> int:
         disable=args.no_progress,
         unit="张",
     ) as source_progress:
-        for image_path, html, base_url in iter_uploaded_htmls(image_paths, args):
-            try:
-                if not args.no_progress:
-                    source_progress.set_postfix_str(image_path.name[:40])
-                save_uploaded_html(html, image_path, save_html_dir, args.encoding, args)
-                name_prefix = args.name or image_path.stem
-                current_output_dir = output_dir_for_image(output_dir, image_path, args)
-                urls = parse_image_urls(html, base_url)
-                result = crawl_urls(urls, current_output_dir, name_prefix, args)
-                if result != 0:
-                    exit_code = result
-            finally:
-                source_progress.update(1)
+        worker_count = max(1, min(args.workers, len(image_paths)))
+        if worker_count == 1:
+            exit_code = process_uploaded_chunk(
+                image_paths, output_dir, save_html_dir, args, source_progress
+            )
+        else:
+            chunks = split_chunks(image_paths, worker_count)
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [
+                    executor.submit(
+                        process_uploaded_chunk,
+                        chunk,
+                        output_dir,
+                        save_html_dir,
+                        args,
+                        source_progress,
+                    )
+                    for chunk in chunks
+                ]
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result != 0:
+                        exit_code = result
 
     return exit_code
 
