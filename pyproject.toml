@@ -1,0 +1,10 @@
+[project]
+name = "baidu-crawl"
+version = "0.1.0"
+description = "Download image URLs from a Baidu Graph similar-image result HTML page."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.uv]
+package = false
