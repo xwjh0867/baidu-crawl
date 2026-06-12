@@ -120,12 +120,12 @@ uv run python crawl_baidu_graph_images.py \
 
 ```bash
 uv run python crawl_baidu_graph_images.py \
-  --upload-dir /Users/wangzhihua1/code/baidu-crawl/thumbnails_v2/FN \
+  --upload-dir /Users/wangzhihua1/code/baidu-crawl/uncrawled_9_categories.txt \
   --recursive \
   --preserve-tree \
   -o "images/thumbnails_FN2/" \
   --save-html-dir "html/thumbnails_FN2" \
-  --scrolls 6 \
+  --scrolls 3 \
   --scroll-pixels 3000 \
   --scroll-wait 5000 \
   --workers 2 \

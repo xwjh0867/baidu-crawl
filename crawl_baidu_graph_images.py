@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import mimetypes
+import os
 import re
 import sys
 import time
@@ -102,13 +103,44 @@ def read_html(args: argparse.Namespace) -> tuple[str, str]:
     raise SystemExit("必须提供 --html 或 --url")
 
 
-def iter_image_files(directory: Path, recursive: bool) -> list[Path]:
-    pattern = "**/*" if recursive else "*"
-    return sorted(
-        path
-        for path in directory.glob(pattern)
-        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
-    )
+def read_image_path_list(list_path: Path) -> list[Path]:
+    if not list_path.is_file():
+        raise SystemExit(f"--upload-dir 必须是包含图片路径的 txt 文件：{list_path}")
+
+    base_dir = list_path.resolve().parent
+    image_paths: list[Path] = []
+    invalid_lines: list[str] = []
+
+    for line_number, raw_line in enumerate(
+        list_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        value = raw_line.strip()
+        if not value or value.startswith("#"):
+            continue
+
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = base_dir / path
+
+        if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+            invalid_lines.append(f"{line_number}: {value}")
+            continue
+
+        image_paths.append(path)
+
+    if invalid_lines:
+        joined = "\n".join(invalid_lines[:10])
+        more = "" if len(invalid_lines) <= 10 else f"\n... 还有 {len(invalid_lines) - 10} 行"
+        raise SystemExit(f"图片路径列表中存在无效图片路径：\n{joined}{more}")
+
+    return image_paths
+
+
+def common_image_parent(image_paths: list[Path]) -> Path:
+    parents = [path.resolve().parent for path in image_paths]
+    if not parents:
+        return Path()
+    return Path(os.path.commonpath(parents))
 
 
 def unique_preserve_order(values: Iterable[str]) -> list[str]:
@@ -470,9 +502,9 @@ def parse_args() -> argparse.Namespace:
     source.add_argument("--html", help="保存好的百度识图结果页 HTML 文件")
     source.add_argument("--url", help="百度识图结果页 URL")
     source.add_argument("--upload-image", help="用 Playwright 上传单张图片并爬取结果")
-    source.add_argument("--upload-dir", help="用 Playwright 逐张上传目录里的图片并爬取结果")
+    source.add_argument("--upload-dir", help="用 Playwright 逐张上传 txt 中列出的图片并爬取结果")
     parser.add_argument("-o", "--output", default="images", help="图片输出目录")
-    parser.add_argument("-n", "--name", help="图片名前缀，例如：宝宝；上传目录时不填则使用源图片文件名")
+    parser.add_argument("-n", "--name", help="图片名前缀，例如：宝宝；上传列表时不填则使用源图片文件名")
     parser.add_argument("--start", type=int, default=0, help="起始编号，默认 0")
     parser.add_argument("--digits", type=int, default=6, help="编号位数，默认 6")
     parser.add_argument("--limit", type=int, default=0, help="最多下载多少张，0 表示不限")
@@ -486,11 +518,11 @@ def parse_args() -> argparse.Namespace:
         help="强制保存扩展名；不设置时按 URL/响应类型判断",
     )
     parser.add_argument("--dry-run", action="store_true", help="只打印图片 URL，不下载")
-    parser.add_argument("--recursive", action="store_true", help="配合 --upload-dir 递归读取图片")
+    parser.add_argument("--recursive", action="store_true", help="兼容旧参数；--upload-dir 改为 txt 后不再使用")
     parser.add_argument("--max-images", type=int, default=0, help="配合 --upload-dir 限制上传图片数量，0 表示不限")
     parser.add_argument("--save-html-dir", help="保存 Playwright 上传后渲染出的 HTML")
     parser.add_argument("--preserve-tree", action="store_true", help="上传模式保留源图片在 --tree-root 下的父目录结构")
-    parser.add_argument("--tree-root", help="目录树根目录；默认使用 --upload-dir")
+    parser.add_argument("--tree-root", help="目录树根目录；默认使用 txt 中图片路径的公共父目录")
     parser.add_argument("--baidu-url", default=DEFAULT_BAIDU_GRAPH_URL, help="百度识图上传页 URL")
     parser.add_argument(
         "--upload-selector",
@@ -530,8 +562,8 @@ def main() -> int:
     if args.upload_image:
         image_paths = [Path(args.upload_image).expanduser()]
     else:
-        upload_dir = Path(args.upload_dir).expanduser()
-        image_paths = iter_image_files(upload_dir, args.recursive)
+        upload_list_path = Path(args.upload_dir).expanduser()
+        image_paths = read_image_path_list(upload_list_path)
         if args.max_images > 0:
             image_paths = image_paths[: args.max_images]
 
@@ -540,7 +572,7 @@ def main() -> int:
 
     if args.preserve_tree and not args.tree_root:
         if args.upload_dir:
-            args.tree_root = str(Path(args.upload_dir).expanduser())
+            args.tree_root = str(common_image_parent(image_paths))
         else:
             raise SystemExit("--upload-image 使用 --preserve-tree 时必须提供 --tree-root")
 
